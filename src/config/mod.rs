@@ -1049,35 +1049,70 @@ pub fn actor_is_explicit(layer: &ConfigLayer) -> bool {
     actor_from_layer(layer).is_some()
 }
 
-/// Detect the grandparent PID (parent of parent process).
+/// Detect a PID from the process ancestry for session disambiguation.
 ///
-/// Returns `None` if detection fails (e.g. permission denied, PID 1 ancestor).
+/// Prefers the grandparent PID (parent of parent), which is typically the
+/// stable agent process (e.g. `agent → shell → br`).  Falls back to the
+/// direct parent PID when grandparent detection fails (e.g. sandboxed
+/// environments like Codex that restrict `ps`).
+///
+/// Returns `None` only if the parent is init/launchd (PID ≤ 1).
 fn grandparent_pid() -> Option<u32> {
     #[cfg(unix)]
     {
         let ppid = std::os::unix::process::parent_id();
-        // Skip if our parent is init/launchd — no meaningful grandparent.
+        // Skip if our parent is init/launchd — no meaningful ancestor.
         if ppid <= 1 {
             return None;
         }
-        let output = std::process::Command::new("ps")
+
+        // Linux: try /proc first (file read, no process spawning needed).
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(gppid) = read_ppid_from_proc(ppid) {
+                if gppid > 1 {
+                    return Some(gppid);
+                }
+            }
+        }
+
+        // Try ps command to get grandparent PID.
+        if let Some(output) = std::process::Command::new("ps")
             .args(["-o", "ppid=", "-p", &ppid.to_string()])
             .output()
-            .ok()?;
-        let gppid: u32 = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse()
-            .ok()?;
-        // Skip if grandparent is init/launchd.
-        if gppid <= 1 {
-            return None;
+            .ok()
+        {
+            if let Ok(gppid) = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse::<u32>()
+            {
+                if gppid > 1 {
+                    return Some(gppid);
+                }
+            }
         }
-        Some(gppid)
+
+        // Fallback: use direct parent PID when grandparent detection fails
+        // (e.g. sandboxed environments). Less stable per-invocation but still
+        // disambiguates concurrent agent sessions at claim time.
+        Some(ppid)
     }
     #[cfg(not(unix))]
     {
         None
     }
+}
+
+/// Read the parent PID of a process from `/proc/{pid}/stat`.
+#[cfg(target_os = "linux")]
+fn read_ppid_from_proc(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Format: "pid (comm) state ppid ..."
+    // Use rfind(')') to handle comm fields containing spaces or parens.
+    let after_comm = stat.rfind(')')? + 1;
+    let fields: Vec<&str> = stat[after_comm..].split_whitespace().collect();
+    // fields[0] = state, fields[1] = ppid
+    fields.get(1)?.parse().ok()
 }
 
 /// Determine if a key is startup-only.

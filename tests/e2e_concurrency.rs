@@ -647,8 +647,8 @@ fn e2e_concurrent_claim_exactly_one_wins() {
 /// should auto-detect the grandparent PID and append it to the actor name,
 /// producing something like "runner-12345" instead of bare "runner".
 ///
-/// This test is Unix-only because `grandparent_pid()` shells out to `ps`,
-/// which is unavailable on Windows and some minimal containers.
+/// This test is Unix-only because `grandparent_pid()` relies on Unix process
+/// ancestry (`parent_id()` / `ps`), which is unavailable on Windows.
 #[test]
 #[cfg(unix)]
 fn e2e_claim_auto_disambiguates_actor() {
